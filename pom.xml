@@ -56,8 +56,8 @@
     <!-- It's easy for Jackson dependencies to get misaligned, so we manage it ourselves. -->
     <jackson.version>2.10.2</jackson.version>
 
-    <!-- only used for proto interop testing -->
-    <wire.version>3.1.0</wire.version>
+    <!-- Only used for proto interop testing; wire-maven-plugin is usually behind latest. -->
+    <wire.version>3.0.2</wire.version>
     <unpack-proto.directory>${project.build.directory}/test/proto</unpack-proto.directory>
 
     <cassandra-driver-core.version>3.8.0</cassandra-driver-core.version>
@@ -560,6 +560,9 @@
             <bnd>SCRIPT_STYLE</bnd>
             <ejs>XML_STYLE</ejs>
             <css>SLASHSTAR_STYLE</css>
+            <Dockerfile.release>SCRIPT_STYLE</Dockerfile.release>
+            <post_push>SCRIPT_STYLE</post_push>
+            <build>SCRIPT_STYLE</build>
           </mapping>
           <excludes>
             <exclude>**/simplelogger.properties</exclude>

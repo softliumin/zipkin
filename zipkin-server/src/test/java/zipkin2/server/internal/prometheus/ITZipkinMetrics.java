@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2019 The OpenZipkin Authors
+ * Copyright 2015-2020 The OpenZipkin Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License. You may obtain a copy of the License at
@@ -16,6 +16,7 @@ package zipkin2.server.internal.prometheus;
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.jayway.jsonpath.JsonPath;
 import com.linecorp.armeria.server.Server;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import java.io.IOException;
@@ -59,7 +60,74 @@ public class ITZipkinMetrics {
   OkHttpClient client = new OkHttpClient.Builder().followRedirects(true).build();
 
   @Before public void init() {
+    registry.scrape(); // we want values reset, not de-registration, which clear() would do
     storage.clear();
+  }
+
+  @Test public void writeSpans_updatesMetrics() throws Exception {
+    List<Span> spans = asList(LOTS_OF_SPANS[0], LOTS_OF_SPANS[1], LOTS_OF_SPANS[2]);
+    byte[] body = SpanBytesEncoder.JSON_V2.encodeList(spans);
+    double messagesCount =
+      registry.counter("zipkin_collector.messages", "transport", "http").count();
+    double bytesCount = registry.counter("zipkin_collector.bytes", "transport", "http").count();
+    double spansCount = registry.counter("zipkin_collector.spans", "transport", "http").count();
+    post("/api/v2/spans", body);
+    post("/api/v2/spans", body);
+
+    String json = getAsString("/metrics");
+
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.messages.http']"))
+      .isEqualTo(messagesCount + 2.0);
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.bytes.http']"))
+      .isEqualTo(bytesCount + (body.length * 2));
+    assertThat(readDouble(json, "$.['gauge.zipkin_collector.message_bytes.http']"))
+      .isEqualTo(body.length);
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.spans.http']"))
+      .isEqualTo(spansCount + (spans.size() * 2));
+    assertThat(readDouble(json, "$.['gauge.zipkin_collector.message_spans.http']"))
+      .isEqualTo(spans.size());
+  }
+
+  @Test public void writeSpans_malformedUpdatesMetrics() throws Exception {
+    byte[] body = {'h', 'e', 'l', 'l', 'o'};
+    double messagesCount =
+      registry.counter("zipkin_collector.messages", "transport", "http").count();
+    double messagesDroppedCount =
+      registry.counter("zipkin_collector.messages_dropped", "transport", "http").count();
+    post("/api/v2/spans", body);
+
+    String json = getAsString("/metrics");
+
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.messages.http']"))
+      .isEqualTo(messagesCount + 1);
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.messages_dropped.http']"))
+      .isEqualTo(messagesDroppedCount + 1);
+  }
+
+  /** This tests logic in {@code BodyIsExceptionMessage} is scoped to POST requests. */
+  @Test public void getTrace_malformedDoesntUpdateCollectorMetrics() throws Exception {
+    double messagesCount =
+      registry.counter("zipkin_collector.messages", "transport", "http").count();
+    double messagesDroppedCount =
+      registry.counter("zipkin_collector.messages_dropped", "transport", "http").count();
+
+    Response response = get("/api/v2/trace/0e8b46e1-81b");
+    assertThat(response.code()).isEqualTo(400);
+
+    String json = getAsString("/metrics");
+
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.messages.http']"))
+      .isEqualTo(messagesCount);
+    assertThat(readDouble(json, "$.['counter.zipkin_collector.messages_dropped.http']"))
+      .isEqualTo(messagesDroppedCount);
+  }
+
+  private String getAsString(String path) throws IOException {
+    Response response = get(path);
+    assertThat(response.isSuccessful())
+      .withFailMessage(response.toString())
+      .isTrue();
+    return response.body().string();
   }
 
   @Test public void metricsIsOK() throws Exception {
@@ -102,27 +170,27 @@ public class ITZipkinMetrics {
 
   @Test public void forwardedRoute_prometheus() throws Exception {
     assertThat(get("/zipkin/api/v2/services").isSuccessful())
-        .isTrue();
+      .isTrue();
 
     assertThat(scrape())
-        .contains("uri=\"/api/v2/services\"")
-        .doesNotContain("uri=\"/zipkin/api/v2/services\"");
+      .contains("uri=\"/api/v2/services\"")
+      .doesNotContain("uri=\"/zipkin/api/v2/services\"");
   }
 
   @Test public void jvmMetrics_prometheus() throws Exception {
     assertThat(scrape())
-        .contains("jvm_memory_max_bytes")
-        .contains("jvm_memory_used_bytes")
-        .contains("jvm_memory_committed_bytes")
-        .contains("jvm_buffer_count_buffers")
-        .contains("jvm_buffer_memory_used_bytes")
-        .contains("jvm_buffer_total_capacity_bytes")
-        .contains("jvm_classes_loaded_classes")
-        .contains("jvm_classes_unloaded_classes_total")
-        .contains("jvm_threads_live_threads")
-        .contains("jvm_threads_states_threads")
-        .contains("jvm_threads_peak_threads")
-        .contains("jvm_threads_daemon_threads");
+      .contains("jvm_memory_max_bytes")
+      .contains("jvm_memory_used_bytes")
+      .contains("jvm_memory_committed_bytes")
+      .contains("jvm_buffer_count_buffers")
+      .contains("jvm_buffer_memory_used_bytes")
+      .contains("jvm_buffer_total_capacity_bytes")
+      .contains("jvm_classes_loaded_classes")
+      .contains("jvm_classes_unloaded_classes_total")
+      .contains("jvm_threads_live_threads")
+      .contains("jvm_threads_states_threads")
+      .contains("jvm_threads_peak_threads")
+      .contains("jvm_threads_daemon_threads");
     // gc metrics are not tested as are not present during test running
   }
 
@@ -182,14 +250,6 @@ public class ITZipkinMetrics {
     );
   }
 
-  private String getAsString(String path) throws IOException {
-    Response response = get(path);
-    assertThat(response.isSuccessful())
-      .withFailMessage(response.toString())
-      .isTrue();
-    return response.body().string();
-  }
-
   private Response get(String path) throws IOException {
     return client.newCall(new Request.Builder().url(url(server, path)).build()).execute();
   }
@@ -210,5 +270,9 @@ public class ITZipkinMetrics {
       result.put(nextField, parser.nextIntValue(0));
     }
     return result;
+  }
+
+  static double readDouble(String json, String jsonPath) {
+    return JsonPath.compile(jsonPath).read(json);
   }
 }
